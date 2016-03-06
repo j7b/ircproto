@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/textproto"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +18,10 @@ type msgping struct {
 	*msg
 }
 
+type msgnum struct {
+	*msg
+}
+
 func (m *msg) Text() string {
 	return m.text
 }
@@ -27,6 +32,31 @@ func (m *msgping) Ping() (tok string) {
 	return
 }
 
+func (msg *msgnum) Num() (i int) {
+	var s string
+	_, err := fmt.Sscan(msg.Text(), &s, &i)
+	if err != nil {
+		panic(err)
+	}
+	return
+}
+
+func (msg *msgnum) Target() (s string) {
+	_, err := fmt.Sscan(msg.Text(), &s, &s, &s)
+	if err != nil {
+		panic(err)
+	}
+	return
+}
+
+func (msg *msgnum) Reply() string {
+	parts := strings.Split(msg.Text(), " ")
+	if len(parts) < 4 {
+		panic("Confusing len parts")
+	}
+	return strings.Join(parts[4:], " ")
+}
+
 type Message interface {
 	Text() string
 }
@@ -34,6 +64,13 @@ type Message interface {
 type Ping interface {
 	Message
 	Ping() string
+}
+
+type Numeric interface {
+	Message
+	Num() int
+	Target() string
+	Reply() string
 }
 
 type ircchannel struct {
@@ -79,16 +116,18 @@ func (m msgchan) requeue(mess Message) {
 	}()
 }
 func parse(line string) (m Message) {
-	if DEBUG {
-		log.Println("parse", line)
-	}
 	msg := &msg{line}
+	parts := strings.Split(line, " ")
 	switch {
 	case strings.Index(line, "PING ") == 0:
 		if DEBUG {
 			log.Println("PING", line)
 		}
 		return &msgping{msg}
+	case len(parts) > 2:
+		if _, err := strconv.Atoi(parts[1]); err == nil {
+			return &msgnum{msg}
+		}
 	default:
 	}
 	return msg
@@ -98,6 +137,7 @@ type client struct {
 	con     *textproto.Conn
 	inbound msgchan
 	textchan
+	Firehose msgchan
 }
 
 func (c *client) Quit(msg string) (err error) {
@@ -113,6 +153,10 @@ func (c *client) inbounds() {
 	for m := range c.inbound {
 		if DEBUG {
 			log.Println("Inbound msg", m)
+		}
+		select {
+			case c.Firehose <-m:
+			default:
 		}
 		switch t := m.(type) {
 		case Ping:
@@ -167,7 +211,7 @@ func New(addr, nick, realname string) (c *client, err error) {
 			inbound <- parse(line)
 		}
 	}()
-	c = &client{con: con, textchan: outbound, inbound: inbound}
+	c = &client{con: con, textchan: outbound, inbound: inbound, Firehose:make(msgchan,256)}
 	go c.inbounds()
 	go c.outbounds()
 	return
